@@ -96,6 +96,7 @@ def dataclass(
     frozen=False,
     kw_only: bool = False,
     mappable_dataclass=True,  # pylint: disable=redefined-outer-name
+    static_keynames=[],
 ):
   """JAX-friendly wrapper for :py:func:`dataclasses.dataclass`.
 
@@ -129,7 +130,7 @@ def dataclass(
   def dcls(cls):
     # Make sure to create a separate _Dataclass instance for each `cls`.
     return _Dataclass(
-        init, repr, eq, order, unsafe_hash, frozen, kw_only, mappable_dataclass
+        init, repr, eq, order, unsafe_hash, frozen, kw_only, mappable_dataclass, static_keynames
     )(cls)
 
   if cls is None:
@@ -150,6 +151,7 @@ class _Dataclass():
       frozen=False,
       kw_only=False,
       mappable_dataclass=True,  # pylint: disable=redefined-outer-name
+      static_keynames=[],
   ):
     self.init = init
     self.repr = repr  # pylint: disable=redefined-builtin
@@ -159,6 +161,7 @@ class _Dataclass():
     self.frozen = frozen
     self.kw_only = kw_only
     self.mappable_dataclass = mappable_dataclass
+    self.static_keynames = static_keynames
 
   def __call__(self, cls):
     """Forwards class to dataclasses's wrapper and registers it with JAX."""
@@ -233,14 +236,18 @@ class _Dataclass():
     setattr(dcls, "__getstate__", _getstate)
     setattr(dcls, "__setstate__", _setstate)
     setattr(dcls, "__init__", _init)
+    setattr(dcls, "_static_keynames", self.static_keynames)
 
     return dcls
 
 
-def _dataclass_unflatten(dcls, keys, values):
+def _dataclass_unflatten(dcls, aux_pack, values):
   """Creates a chex dataclass from a flatten jax.tree_util representation."""
   dcls_object = dcls.__new__(dcls)
+  keys, static_keynames, static_keyvals = aux_pack
   attribute_dict = dict(zip(keys, values))
+  # Add static items to the attribute dict.
+  attribute_dict.update(zip(static_keynames, static_keyvals))
   # Looping over fields instead of keys & values preserves the field order.
   # Using dataclasses.fields fails because dataclass uids change after
   # serialisation (eg, with cloudpickle).
@@ -256,11 +263,27 @@ def _dataclass_unflatten(dcls, keys, values):
 def _flatten_with_path(dcls):
   path = []
   keys = []
+
+  static_keynames = []
+  static_keyvals = []
+
   for k, v in sorted(dcls.__dict__.items()):
     k = jax.tree_util.GetAttrKey(k)
-    path.append((k, v))
-    keys.append(k)
-  return path, keys
+    # Store the static keys separately.
+    if k.name in dcls._static_keynames:
+      static_keynames.append(k)
+      static_keyvals.append(v)
+    else:
+      path.append((k, v))
+      keys.append(k)
+  return path, (keys, static_keynames, static_keyvals)
+
+
+def flatten(dcls):
+  paths, (keys, static_keynames, static_keyvals) = _flatten_with_path(dcls)
+  vals = [p[1] for p in paths]
+  keys = [k.name for k in keys]
+  return vals, (keys, static_keynames, static_keyvals)
 
 
 @functools.cache
@@ -277,7 +300,6 @@ def register_dataclass_type_with_jax_tree_util(data_class):
       constructable from keyword arguments corresponding to the members exposed
       in instance.__dict__.
   """
-  flatten = lambda d: jax.util.unzip2(sorted(d.__dict__.items()))[::-1]
   unflatten = functools.partial(_dataclass_unflatten, data_class)
   try:
     jax.tree_util.register_pytree_with_keys(
