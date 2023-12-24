@@ -96,7 +96,7 @@ def dataclass(
     frozen=False,
     kw_only: bool = False,
     mappable_dataclass=True,  # pylint: disable=redefined-outer-name
-    static_keynames=[],
+    static_keynames=None,
 ):
   """JAX-friendly wrapper for :py:func:`dataclasses.dataclass`.
 
@@ -123,6 +123,8 @@ def dataclass(
       As a side-effect, e.g. `np.testing.assert_array_equal` will only check
       the field names are equal and not the content. Use `chex.assert_tree_*`
       instead.
+    static_keynames: A list of field names that should be ignored by JAX
+      transformations.
 
   Returns:
     A JAX-friendly dataclass.
@@ -130,7 +132,15 @@ def dataclass(
   def dcls(cls):
     # Make sure to create a separate _Dataclass instance for each `cls`.
     return _Dataclass(
-        init, repr, eq, order, unsafe_hash, frozen, kw_only, mappable_dataclass, static_keynames
+        init,
+        repr,
+        eq,
+        order,
+        unsafe_hash,
+        frozen,
+        kw_only,
+        mappable_dataclass,
+        static_keynames,
     )(cls)
 
   if cls is None:
@@ -151,7 +161,7 @@ class _Dataclass():
       frozen=False,
       kw_only=False,
       mappable_dataclass=True,  # pylint: disable=redefined-outer-name
-      static_keynames=[],
+      static_keynames=None,
   ):
     self.init = init
     self.repr = repr  # pylint: disable=redefined-builtin
@@ -236,7 +246,7 @@ class _Dataclass():
     setattr(dcls, "__getstate__", _getstate)
     setattr(dcls, "__setstate__", _setstate)
     setattr(dcls, "__init__", _init)
-    setattr(dcls, "_static_keynames", self.static_keynames)
+    setattr(dcls, "static_keynames", self.static_keynames)
 
     return dcls
 
@@ -270,7 +280,8 @@ def _flatten_with_path(dcls):
   for k, v in sorted(dcls.__dict__.items()):
     k = jax.tree_util.GetAttrKey(k)
     # Store the static keys separately.
-    if k.name in dcls._static_keynames:
+    if (dcls.static_keynames is not None and
+        k.name in dcls.static_keynames):
       static_keynames.append(k)
       static_keyvals.append(v)
     else:
